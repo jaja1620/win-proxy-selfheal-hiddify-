@@ -1,6 +1,6 @@
-# ProxySelfHeal · Windows 系统代理残留自愈补丁
+# ProxySelfHeal · 解决 Hiddify 等代理软件导致的 Windows 开机断网
 
-> 一键修复 **Hiddify / Clash / v2rayN / Shadowsocks / sing-box** 等代理软件**未正常退出就关机**后，导致 Windows 下次开机出现 **「网络已连接，但所有网页打不开」** 的问题。
+**Windows 系统代理残留自愈补丁** —— 修复 Hiddify / Clash / v2rayN / Shadowsocks / sing-box 等代理软件**未正常退出就关机**后，下次开机出现 **「网络已连接，但所有网页打不开」** 的问题。
 
 ```
 Windows 10 / 11 · .NET Framework 4.x · 单文件 exe · 无需管理员权限 · 无网络行为
