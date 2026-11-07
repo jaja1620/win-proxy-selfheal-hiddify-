@@ -6,7 +6,7 @@
 Windows 10 / 11 · .NET Framework 4.x · 单文件 exe · 无需管理员权限 · 仅本地连通性探测
 ```
 
-> **v2.0.0 更新（重要）**
+> **v2.0 更新（重要）**
 >
 > v1.0 只在登录后做事——如果代理软件自己启动了、端口也活着，但**根本没连上节点**，v1 会误判为「正常」直接放过，开机照样上不了网。
 >
@@ -15,6 +15,8 @@ Windows 10 / 11 · .NET Framework 4.x · 单文件 exe · 无需管理员权限 
 > 1. **关机/重启/注销前主动清理**：常驻守护监听系统会话结束事件，先结束代理客户端，再关闭系统代理，确保下次开机时系统代理处于关闭状态；
 > 2. **出网可用性探测**：端口在监听但经该代理访问外网失败（连续两次确认），同样判定为故障并复位；
 > 3. **精确进程白名单**：只结束名单内的代理客户端，绝不触碰任何系统服务。
+>
+> **v2.0.1 修复**：出网探测原先一律用 HTTP 代理方式连接，遇到 SOCKS 协议的正常代理（如 Shadowsocks 的 `socks=127.0.0.1:1080`）会误判为故障并把它关掉。现已改为按 `ProxyServer` 标注的协议分别探测（SOCKS5 / SOCKS4 原生握手），已用真实 SOCKS5 与 HTTP 代理双向验证不误判。
 >
 > v1.0 用户直接运行新版 exe 覆盖安装即可，自启项会自动升级。
 
@@ -28,15 +30,20 @@ Windows 10 / 11 · .NET Framework 4.x · 单文件 exe · 无需管理员权限 
 
 如果你遇到的是这个现象，本工具就是为你准备的。
 
-**受影响的软件**（只要是"系统代理"模式的桌面客户端都可能中招）：
+**受影响的软件**（只要是「系统代理」模式的桌面客户端都可能中招）：
 
-| 软件 | 是否常见 |
-|---|---|
-| Hiddify / Hiddify Next | 非常常见，尤其是 MSIX 商店版本 |
-| Clash for Windows / Clash Verge | 常见 |
-| v2rayN / v2rayNG(桌面) | 常见 |
-| Shadowsocks / ShadowsocksR | 常见（老问题，教程一堆） |
-| sing-box / NekoRay / NekoBox | 常见 |
+| 软件 | 系统代理写法 | 是否常见 |
+|---|---|---|
+| Hiddify / Hiddify Next | `127.0.0.1:端口` 或 `socks=...` | 非常常见，尤其是 MSIX 商店版本 |
+| Clash for Windows / Clash Verge | `127.0.0.1:7890` 或 `http=...;https=...` | 常见 |
+| v2rayN | `http=127.0.0.1:10809;https=...` | 常见 |
+| Shadowsocks / ShadowsocksR | `socks=127.0.0.1:1080` | 常见（老问题，教程一堆） |
+| sing-box / NekoRay / NekoBox | `127.0.0.1:端口` | 常见 |
+| Mihomo / Clash Meta 内核前端 | `http=...;https=...` | 常见 |
+
+**关键点：判定逻辑与具体是哪款软件无关。** 它读的是 Windows 自己那一个注册表位置（`HKCU\...\Internet Settings`），凡是走「系统代理」模式接管流量的客户端，都会写同一组键，因此都在覆盖范围内——包括上面没列到的、自己写的小工具，甚至命令行手动设的代理。
+
+唯一与具体软件有关的是**关机时结束进程**这一步：它按固定白名单匹配进程名（见第六章第 4 条）。不在名单里的客户端，关机时进程不会被结束，但系统代理仍会被正常关闭，所以下次开机同样不会断网。
 
 ---
 
@@ -286,10 +293,14 @@ build.cmd
 ```cmd
 %WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe ^
   /target:exe /platform:anycpu /optimize+ /codepage:65001 ^
+  /r:System.dll /r:System.Core.dll /r:System.Windows.Forms.dll ^
+  /r:System.Drawing.dll /r:System.Management.dll ^
   /out:ProxySelfHeal.exe src\ProxySelfHeal.cs
 ```
 
-产物约 20 KB。
+产物约 35 KB。
+
+> 注意：v2.0 起需要引用 `System.Windows.Forms`（关机事件）与 `System.Management`（识别守护进程），缺了会编译报错。`build.cmd` 已内置这些参数。
 
 ---
 
@@ -297,11 +308,25 @@ build.cmd
 
 **支持**：Windows 10 / 11（含 Server 2019+），x64 / x86，.NET Framework 4.x（Win10 1809 起系统自带）。
 
-**不覆盖**：
+### 支持的代理协议
+
+出网可用性探测会按 `ProxyServer` 里标注的协议走对应探测方式，不会拿错协议去连：
+
+| 写法 | 探测方式 | 说明 |
+|---|---|---|
+| `127.0.0.1:端口`（无前缀） | HTTP 代理（CONNECT） | Hiddify mixed 端口、Clash 默认都属此类 |
+| `http=...;https=...` | HTTP 代理 | v2rayN 的典型写法 |
+| `socks=127.0.0.1:端口` | 先 SOCKS5 握手，再试 SOCKS4 | Shadowsocks 的典型写法 |
+| `socks5=...` / `socks4=...` | 对应协议 | — |
+
+若两种 SOCKS 协议都因为「对端根本不是 SOCKS 端口」而无法判定，程序会**放弃判定、不做任何修改**——宁可漏判一次，也不误清一个正在工作的代理。
+
+### 不覆盖
 
 1. 仅处理 **WinINET 层**（浏览器、Office、多数桌面客户端）。`netsh winhttp` 层与环境变量 `http_proxy` 不在处理范围（这两层通常不会被代理客户端写入）。
 2. 仅作用于**当前用户**。多用户共用机器需各自部署一次。
-3. 这是**故障后自愈**，不是预防。
+3. **TUN / 虚拟网卡模式**的代理本来就不写系统代理，因此不会出这类故障，也不需要本工具。
+4. 若某客户端把代理指向**远程地址**（非 `127.0.0.1` / `localhost` / `::1`），本工具一律不碰——这条是有意为之的保护。
 
 ---
 

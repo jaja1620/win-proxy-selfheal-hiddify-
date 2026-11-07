@@ -16,8 +16,8 @@ using Microsoft.Win32;
 [assembly: AssemblyDescription("Windows system proxy residue self-heal patch")]
 [assembly: AssemblyProduct("ProxySelfHeal Patch")]
 [assembly: AssemblyCompany("")]
-[assembly: AssemblyVersion("2.0.0.0")]
-[assembly: AssemblyFileVersion("2.0.0.0")]
+[assembly: AssemblyVersion("2.0.1.0")]
+[assembly: AssemblyFileVersion("2.0.1.0")]
 
 namespace ProxySelfHeal
 {
@@ -70,7 +70,7 @@ namespace ProxySelfHeal
         private const int INTERNET_OPTION_REFRESH = 37;
         private const int INTERNET_OPTION_SETTINGS_CHANGED = 39;
         private const int SW_HIDE = 0;
-        private const string Version = "2.0.0";
+        private const string Version = "2.0.1";
 
         // 受管的代理客户端进程名（精确匹配，绝不包含系统服务）
         private static readonly string[] ProxyProcessNames = new string[]
@@ -88,6 +88,13 @@ namespace ProxySelfHeal
             "http://connect.rom.miui.com/generate_204",
             "http://www.baidu.com/",
             "http://wifi.vivo.com.cn/generate_204"
+        };
+
+        // SOCKS 探测目标（域名走代理端解析）：{ host, port }
+        private static readonly string[][] ProbeTargets = new string[][]
+        {
+            new string[] { "www.baidu.com", "80" },
+            new string[] { "connect.rom.miui.com", "80" }
         };
 
         private static Mutex _guardMutex;
@@ -328,7 +335,7 @@ namespace ProxySelfHeal
             return d;
         }
 
-        // 代理端口在监听，但实际请求出不去 —— 典型场景：Hiddify 已自启但未连上节点
+        // 代理端口在监听，但实际请求出不去 —— 典型场景：客户端已自启但未连上节点
         private static void CheckProxyUsable(EndpointInfo live, Diagnosis d)
         {
             try
@@ -339,13 +346,16 @@ namespace ProxySelfHeal
                     return;
                 }
 
-                if (ProxyPathWorks(live.Host, live.Port))
+                int r = ProxyPathWorks(live);
+                if (r != 0)
                 {
+                    // 1 = 可用；-1 = 无法判定（协议不支持等），一律不动，宁可漏判也不误清
                     return;
                 }
 
                 Thread.Sleep(1200);
-                if (ProxyPathWorks(live.Host, live.Port))
+                r = ProxyPathWorks(live);
+                if (r != 0)
                 {
                     return;
                 }
@@ -368,14 +378,179 @@ namespace ProxySelfHeal
             return false;
         }
 
-        private static bool ProxyPathWorks(string host, int port)
+        // 返回值：1=代理可用，0=确认不可用，-1=无法判定
+        private static int ProxyPathWorks(EndpointInfo ep)
         {
-            string addr = "http://" + host + ":" + port.ToString(CultureInfo.InvariantCulture);
+            string scheme = (ep.Scheme == null) ? string.Empty : ep.Scheme.Trim().ToLowerInvariant();
+
+            // SOCKS 系代理必须用 SOCKS 协议去探测。
+            // 若用 HTTP 代理方式去连 SOCKS 端口必然失败，会把正常工作的代理误判成故障。
+            if (scheme.StartsWith("socks", StringComparison.Ordinal))
+            {
+                bool unknownOnly = false;
+                for (int i = 0; i < ProbeTargets.Length; i++)
+                {
+                    string th = ProbeTargets[i][0];
+                    int tp = int.Parse(ProbeTargets[i][1], CultureInfo.InvariantCulture);
+
+                    int r5 = Socks5Probe(ep.Host, ep.Port, th, tp, 4000);
+                    if (r5 == 1) return 1;
+                    if (r5 == -1) unknownOnly = true;
+
+                    int r4 = Socks4Probe(ep.Host, ep.Port, th, tp, 4000);
+                    if (r4 == 1) return 1;
+                    if (r4 == -1) unknownOnly = true;
+                }
+                // 两种协议都因为“不是 SOCKS 端口”而无法判定时，不下结论
+                return unknownOnly ? -1 : 0;
+            }
+
+            // HTTP / HTTPS / 未标注：按 HTTP 代理方式探测
+            string addr = "http://" + ep.Host + ":" + ep.Port.ToString(CultureInfo.InvariantCulture);
             for (int i = 0; i < ProbeUrls.Length; i++)
             {
-                if (ProbeUrl(ProbeUrls[i], addr, 3500)) return true;
+                if (ProbeUrl(ProbeUrls[i], addr, 3500)) return 1;
             }
-            return false;
+            return 0;
+        }
+
+        // SOCKS5：方法协商 -> CONNECT -> 走隧道发一个 HTTP 请求验证
+        private static int Socks5Probe(string proxyHost, int proxyPort, string targetHost, int targetPort, int timeoutMs)
+        {
+            TcpClient client = null;
+            try
+            {
+                client = new TcpClient();
+                IAsyncResult ar = client.BeginConnect(proxyHost, proxyPort, null, null);
+                if (!ar.AsyncWaitHandle.WaitOne(timeoutMs, false)) return 0;
+                client.EndConnect(ar);
+                client.ReceiveTimeout = timeoutMs;
+                client.SendTimeout = timeoutMs;
+                NetworkStream ns = client.GetStream();
+
+                ns.Write(new byte[] { 5, 1, 0 }, 0, 3);
+                byte[] hello = ReadExact(ns, 2);
+                if (hello == null || hello[0] != 5) return -1;   // 不是 SOCKS5 端口
+                if (hello[1] != 0) return 0;                     // 需要认证，视为不可用
+
+                byte[] hostBytes = Encoding.ASCII.GetBytes(targetHost);
+                byte[] req = new byte[5 + hostBytes.Length + 2];
+                req[0] = 5; req[1] = 1; req[2] = 0; req[3] = 3; req[4] = (byte)hostBytes.Length;
+                Array.Copy(hostBytes, 0, req, 5, hostBytes.Length);
+                req[req.Length - 2] = (byte)(targetPort >> 8);
+                req[req.Length - 1] = (byte)(targetPort & 0xFF);
+                ns.Write(req, 0, req.Length);
+
+                byte[] rep = ReadExact(ns, 4);
+                if (rep == null || rep[0] != 5) return -1;
+                if (rep[1] != 0) return 0;                       // CONNECT 被拒绝
+
+                int atyp = rep[3];
+                if (atyp == 1)
+                {
+                    if (ReadExact(ns, 6) == null) return 0;
+                }
+                else if (atyp == 3)
+                {
+                    byte[] l = ReadExact(ns, 1);
+                    if (l == null) return 0;
+                    if (ReadExact(ns, l[0] + 2) == null) return 0;
+                }
+                else if (atyp == 4)
+                {
+                    if (ReadExact(ns, 18) == null) return 0;
+                }
+                else return 0;
+
+                return SendHttpOverTunnel(ns, targetHost);
+            }
+            catch
+            {
+                return 0;
+            }
+            finally
+            {
+                if (client != null) { try { client.Close(); } catch { } }
+            }
+        }
+
+        // SOCKS4 / SOCKS4a：老客户端与 WinINET 的 socks= 常用这一版
+        private static int Socks4Probe(string proxyHost, int proxyPort, string targetHost, int targetPort, int timeoutMs)
+        {
+            TcpClient client = null;
+            try
+            {
+                client = new TcpClient();
+                IAsyncResult ar = client.BeginConnect(proxyHost, proxyPort, null, null);
+                if (!ar.AsyncWaitHandle.WaitOne(timeoutMs, false)) return 0;
+                client.EndConnect(ar);
+                client.ReceiveTimeout = timeoutMs;
+                client.SendTimeout = timeoutMs;
+                NetworkStream ns = client.GetStream();
+
+                // SOCKS4a：DSTIP 填 0.0.0.1，域名跟在 USERID 之后
+                byte[] hostBytes = Encoding.ASCII.GetBytes(targetHost);
+                byte[] req = new byte[8 + 1 + hostBytes.Length + 1];
+                req[0] = 4; req[1] = 1;
+                req[2] = (byte)(targetPort >> 8);
+                req[3] = (byte)(targetPort & 0xFF);
+                req[4] = 0; req[5] = 0; req[6] = 0; req[7] = 1;
+                req[8] = 0;
+                Array.Copy(hostBytes, 0, req, 9, hostBytes.Length);
+                req[req.Length - 1] = 0;
+                ns.Write(req, 0, req.Length);
+
+                byte[] rep = ReadExact(ns, 8);
+                if (rep == null) return 0;
+                // SOCKS4 的响应首字节是 0（VN），若返回 5 说明其实是 SOCKS5 端口
+                if (rep[0] == 5) return -1;
+                if (rep[1] != 90) return 0;                      // 90 = 请求通过
+
+                return SendHttpOverTunnel(ns, targetHost);
+            }
+            catch
+            {
+                return 0;
+            }
+            finally
+            {
+                if (client != null) { try { client.Close(); } catch { } }
+            }
+        }
+
+        private static int SendHttpOverTunnel(NetworkStream ns, string host)
+        {
+            try
+            {
+                string http = "HEAD / HTTP/1.1\r\nHost: " + host + "\r\nUser-Agent: ProxySelfHeal/" + Version
+                    + "\r\nConnection: close\r\n\r\n";
+                byte[] hb = Encoding.ASCII.GetBytes(http);
+                ns.Write(hb, 0, hb.Length);
+
+                byte[] buf = new byte[64];
+                int n = ns.Read(buf, 0, buf.Length);
+                if (n <= 0) return 0;
+                string head = Encoding.ASCII.GetString(buf, 0, Math.Min(n, 32));
+                if (head.StartsWith("HTTP/", StringComparison.Ordinal)) return 1;
+                return 0;
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        private static byte[] ReadExact(NetworkStream ns, int count)
+        {
+            byte[] buf = new byte[count];
+            int off = 0;
+            while (off < count)
+            {
+                int n = ns.Read(buf, off, count - off);
+                if (n <= 0) return null;
+                off += n;
+            }
+            return buf;
         }
 
         private static bool ProbeUrl(string url, string proxyAddress, int timeoutMs)
