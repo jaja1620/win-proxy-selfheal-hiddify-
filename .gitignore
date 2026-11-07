@@ -1,0 +1,15 @@
+# 编译产物（通过 Releases 分发，不纳入版本控制）
+ProxySelfHeal.exe
+*.pdb
+*.obj
+
+# IDE
+.vs/
+*.user
+*.suo
+
+# 临时文件
+*.log
+tmp/
+bin/
+obj/
