@@ -10,7 +10,9 @@ if not exist "%CSC%" (
 )
 
 echo [INFO] 使用编译器: %CSC%
-"%CSC%" /nologo /target:exe /platform:anycpu /optimize+ /codepage:65001 /out:ProxySelfHeal.exe src\ProxySelfHeal.cs
+"%CSC%" /nologo /target:exe /platform:anycpu /optimize+ /codepage:65001 ^
+  /r:System.dll /r:System.Core.dll /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:System.Management.dll ^
+  /out:ProxySelfHeal.exe src\ProxySelfHeal.cs
 
 if errorlevel 1 (
     echo [ERROR] 编译失败
