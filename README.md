@@ -82,7 +82,7 @@ HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings
 
 ### 方式一：下载即用（推荐）
 
-1. 到 [Releases](../../releases) 下载 `ProxySelfHeal.exe`
+1. 到 [Releases](https://github.com/jaja1620/win-proxy-selfheal/releases) 下载 `ProxySelfHeal.exe`
 2. **双击运行**，看到「部署完成」即可
 3. 结束
 
